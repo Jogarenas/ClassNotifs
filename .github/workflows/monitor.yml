@@ -1,0 +1,45 @@
+name: Davidson course monitor
+
+on:
+  schedule:
+    - cron: '2-57/5 * * * *'
+  workflow_dispatch:
+    inputs:
+      test_notification:
+        description: Send a test push before the normal course check
+        type: boolean
+        default: false
+
+# All refs and manual/scheduled runs share this lock. Never cancel a delivery.
+concurrency:
+  group: davidson-course-monitor
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Run unit tests
+        run: python -m unittest discover -s tests -v
+      - name: Check courses and optionally send test
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+          SEND_TEST: ${{ inputs.test_notification || false }}
+        run: |
+          args=()
+          if [[ "$SEND_TEST" == "true" ]]; then
+            args+=(--test-notification)
+          fi
+          python monitor.py "${args[@]}"
