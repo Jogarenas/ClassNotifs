@@ -93,6 +93,9 @@ checkpointing, state write failures, and optimistic concurrency.
   paste the topic into public logs. ntfy errors fail the run and retry next check.
 - **403 writing state:** allow Actions read/write contents permissions and ensure
   repository rules allow `GITHUB_TOKEN` updates to `monitor-state`.
+- **Local HTTPS certificate error:** repair your Python installation's CA
+  certificates or use a Python with a working system trust store. Keep HTTPS
+  verification enabled; the GitHub-hosted runner has its own trust store.
 - **404/missing state:** inspect that branch and restore its latest good state;
   do not replace it with empty history. Missing API courses may indicate an upstream
   outage, term change, or removed section; investigate before changing guards.
