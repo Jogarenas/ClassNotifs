@@ -2,7 +2,7 @@ name: Davidson course monitor
 
 on:
   schedule:
-    - cron: '2-57/5 * * * *'
+    - cron: '3-58/5 * * * *'
   workflow_dispatch:
     inputs:
       test_notification:

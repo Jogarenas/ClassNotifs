@@ -34,7 +34,7 @@ to register; an alert does not reserve a seat or establish registration eligibil
 
 ## Behavior and persistence
 
-The workflow requests checks at UTC minutes **02, 07, 12, …, 57** every hour.
+The workflow requests checks at UTC minutes **03, 08, 13, …, 58** every hour.
 [GitHub scheduled runs](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#schedule)
 can be delayed or dropped during high load; this is not an exact five-minute
 timer. Public-repository schedules can be disabled after 60 days of repository
