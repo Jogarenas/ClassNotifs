@@ -1,10 +1,46 @@
 # ClassNotifs
 
-Phone pushes for **every section of Davidson ECO 203 and ECO 204, Spring 2027
+Phone pushes when seats open in your configured Davidson courses, across any
+department. Currently watches **every section of ECO 203 and ECO 204, Spring 2027
 (term 202602)**. Python 3.12+, standard library only. New sections are discovered
-automatically from the [official live API](https://api.davidson.edu/api/public/v2/courses?departments=ECO&term_code=202602&limit=200).
-Open the [course schedule](https://course-schedule.davidson.edu/#/schedule?departments=ECO&term_code=202602)
+automatically from Davidson's live API, with one request per watched department.
+Open the [course schedule](https://course-schedule.davidson.edu/#/schedule?term_code=202602)
 to register; an alert does not reserve a seat or establish registration eligibility.
+
+## Choose courses
+
+Edit `WATCHED_COURSES` near the top of `monitor.py`. Group course numbers by
+their department code; use strings for numbers. For example:
+
+```python
+WATCHED_COURSES = {
+    "ECO": {"203", "204"},
+    "MAT": {"230"},
+}
+```
+
+This example adds every section of MAT 230; it is not enabled by default. Use
+the exact subject code and course number from Davidson's schedule. No changes
+to notification logic, workflow, scheduler, or secrets are needed to add courses.
+Run `python3 monitor.py --dry-run` to confirm all configured courses are found,
+then deploy the change to `main` for the scheduled workflow to pick it up.
+
+`KNOWN_SECTIONS` is an optional completeness guard, keyed by department and
+number. Existing ECO entries protect the current installation; adding another
+course does not require listing its CRNs. After a successful check, persisted
+history guards newly discovered sections too. Keep the existing state when
+adding courses so previously acknowledged openings do not alert again.
+
+Removing a watched course with saved sections requires deliberate cleanup of
+only those sections in `monitor-state:state.json`; otherwise the missing-section
+guard stops the check. Do not reset the whole file. When changing `TERM`, update
+the known-section guards and use a separate state branch for that term by setting
+`STATE_BRANCH` and creating its initial `state.json` as described below. Verify
+the dry run before enabling monitoring for that term.
+
+The module docstring and function docstrings in `monitor.py` describe the fetch,
+validation, alert, and persistence flow. The script does not automatically load
+the local `.env`; normal scheduled runs receive credentials from Actions secrets.
 
 ## Setup
 
@@ -32,9 +68,55 @@ to register; an alert does not reserve a seat or establish registration eligibil
    Only then consider monitoring active. The existing hourly ChatGPT backup is
    separate; this project does not disable it.
 
+## External scheduler: every minute
+
+Use [cron-job.org](https://cron-job.org/en/faq/) for the primary timer. Its free
+service supports intervals down to one minute, custom headers, and POST bodies.
+The workflow already accepts `workflow_dispatch`, so this setup needs no code
+deployment. Leave the native GitHub schedule enabled as a backup.
+
+1. Create a [fine-grained GitHub token](https://github.com/settings/personal-access-tokens/new)
+   with resource owner `Jogarenas`, access to **only `ClassNotifs`**, and repository
+   permission **Actions: Read and write**. Use a dedicated token and set a reminder
+   to replace it before its expiration date.
+2. Sign up or log in at the [cron-job.org console](https://console.cron-job.org/)
+   and create a job named **ClassNotifs: every minute** with these settings:
+
+   | Setting | Value |
+   | --- | --- |
+   | URL | `https://api.github.com/repos/Jogarenas/ClassNotifs/actions/workflows/monitor.yml/dispatches` |
+   | Schedule | Every minute, all hours and days (`* * * * *`) |
+   | Method | `POST` |
+   | Request body | `{"ref":"main"}` |
+   | `Authorization` header | `Bearer YOUR_DEDICATED_GITHUB_TOKEN` |
+   | `Accept` header | `application/vnd.github+json` |
+   | `Content-Type` header | `application/json` |
+   | `X-GitHub-Api-Version` header | `2026-03-10` |
+
+   Store the token only in the scheduler's authorization header. The scheduler
+   needs that credential to request future runs; the ntfy topic remains solely
+   in GitHub Actions secrets. Disable response-body storage and enable email
+   notifications for failures, recovery, and automatic job disabling.
+3. Enable the job. Verify its execution history shows successful requests at
+   one-minute intervals and that corresponding **workflow_dispatch** runs in
+   [GitHub Actions](https://github.com/Jogarenas/ClassNotifs/actions/workflows/monitor.yml)
+   complete successfully. Dispatch acceptance alone does not mean the course
+   check or push delivery succeeded; enable GitHub Actions failure notifications
+   separately.
+
+This requests **1,440 runs per day**. The scheduler is free; standard GitHub-hosted
+Actions runners are free while this repository remains public. One minute is
+the requested trigger interval, not a guarantee of check completion: both the
+external service and GitHub runners can experience delays. To stop the external
+timer, disable its job in cron-job.org; disabling the whole GitHub workflow also
+blocks external dispatches. To rotate the token, update the scheduler header,
+verify a successful request/run, then revoke the old token.
+
 ## Behavior and persistence
 
-The workflow requests checks at UTC minutes **03, 08, 13, …, 58** every hour.
+The native GitHub backup schedule requests checks at UTC minutes
+**03, 08, 13, …, 58** every hour. Once configured, the external scheduler above
+requests the primary checks every minute.
 [GitHub scheduled runs](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#schedule)
 can be delayed or dropped during high load; this is not an exact five-minute
 timer. Public-repository schedules can be disabled after 60 days of repository

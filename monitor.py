@@ -1,4 +1,24 @@
-"""Davidson ECO opening monitor. Python standard library only."""
+"""Watch Davidson course sections and send ntfy pushes when seats open.
+
+Configuration lives below: set TERM and add department/course-number pairs to
+WATCHED_COURSES. Every section of each listed course is discovered automatically.
+For example, adding "MAT": {"230"} watches MAT 230 alongside the existing courses.
+Course numbers are strings so suffixes such as "101L" can be represented.
+
+Run `python monitor.py --dry-run` to validate a new course list against the live
+API without sending pushes or writing state. Normal runs require GITHUB_TOKEN,
+GITHUB_REPOSITORY, and NTFY_TOPIC in the environment; this script does not load
+.env files. The workflow supplies these values through GitHub Actions.
+
+The flow is fetch all departments → validate the entire snapshot → compare with
+saved availability → send alerts → checkpoint receipts. No notification or state
+change happens if the snapshot is incomplete. State lives on STATE_BRANCH and
+must be preserved when adding courses to avoid repeating acknowledged alerts.
+Only positive remaining enrollment counts as open. Continued availability sends
+one alert; a confirmed closure followed by reopening permits another alert.
+
+Python standard library only. GitHub Actions serializes concurrent invocations.
+"""
 
 import argparse
 import base64
@@ -10,14 +30,27 @@ import re
 import sys
 import urllib.error
 import urllib.request
+from urllib.parse import urlencode
 from datetime import datetime, timezone
 
-API_URL = "https://api.davidson.edu/api/public/v2/courses?departments=ECO&term_code=202602&limit=200"
-SCHEDULE_URL = "https://course-schedule.davidson.edu/#/schedule?departments=ECO&term_code=202602"
+# Edit this block to choose courses. Numbers apply only to their own department.
 TERM = "202602"
-NUMBERS = {"203", "204"}
-# Known sections guard against incomplete first responses; new CRNs are discovered.
-BASELINE_CRNS = {"20161", "20162", "20592", "20163", "20164"}
+WATCHED_COURSES = {
+    "ECO": {"203", "204"},
+    # "MAT": {"230"},  # Uncomment or add another department to watch it too.
+}
+# Optional completeness guards for sections already verified in this term.
+# New courses do not need CRNs here: their sections are discovered from the API.
+# When changing TERM, verify/update these guards and use state for the new term.
+KNOWN_SECTIONS = {
+    ("ECO", "203"): {"20161", "20162", "20592"},
+    ("ECO", "204"): {"20163", "20164"},
+    ("ECO", "211"): {"20167", "20168"},
+    ("HIS", "163"): {"20260"}
+
+}
+API_LIMIT = 200
+SCHEDULE_URL = f"https://course-schedule.davidson.edu/#/schedule?term_code={TERM}"
 STATE_BRANCH = "monitor-state"
 
 
@@ -46,14 +79,61 @@ def request_json(url, *, data=None, headers=None, method=None):
 
 
 def text(value, name):
+    """Require a nonempty display/identity field instead of guessing a value."""
     if not isinstance(value, str) or not value.strip():
         raise MonitorError(f"Missing or invalid {name}")
     return value.strip()
 
 
+def watched_courses():
+    """Validate configuration and return exact (department, number) identities."""
+    if not isinstance(WATCHED_COURSES, dict) or not WATCHED_COURSES:
+        raise MonitorError("WATCHED_COURSES must list at least one department and course")
+    targets = set()
+    for subject, numbers in WATCHED_COURSES.items():
+        if not isinstance(subject, str) or not re.fullmatch(r"[A-Z]+", subject):
+            raise MonitorError("Course departments must be uppercase subject codes")
+        if not isinstance(numbers, (set, list, tuple)) or not numbers:
+            raise MonitorError("Each department must list at least one course number")
+        for number in numbers:
+            if not isinstance(number, str) or not re.fullmatch(r"[0-9]+[A-Za-z]*", number):
+                raise MonitorError("Course numbers must be strings such as '203' or '101L'")
+            targets.add((subject, number))
+    return targets
+
+
+def course_api_url(subject):
+    """Fetch departments separately so a larger watch list cannot truncate a union."""
+    query = urlencode({"departments": subject, "term_code": TERM, "limit": API_LIMIT})
+    return f"https://api.davidson.edu/api/public/v2/courses?{query}"
+
+
+def fetch_courses():
+    """Collect all configured departments before allowing any deliveries.
+
+    A full API page may indicate more results than we received. Refuse it rather
+    than silently missing sections; pagination would be needed for that department.
+    """
+    targets = watched_courses()
+    payload = []
+    for subject in sorted({subject for subject, _ in targets}):
+        rows = request_json(course_api_url(subject))
+        if not isinstance(rows, list) or not rows or len(rows) >= API_LIMIT:
+            raise MonitorError(f"Empty, malformed, or possibly truncated {subject} response")
+        payload.extend(rows)
+    return payload
+
+
 def parse_courses(payload, previous):
-    """Validate the complete snapshot before any state write or notification."""
-    if not isinstance(payload, list) or not payload or len(payload) >= 200:
+    """Validate target sections, including known CRNs, before changing anything.
+
+    Every configured course must appear. Previously discovered sections must also
+    remain present; a missing section is not evidence that its enrollment closed.
+    Removing a course with saved history therefore requires deliberate state
+    cleanup, not just deleting its configuration entry.
+    """
+    targets = watched_courses()
+    if not isinstance(payload, list) or not payload:
         raise MonitorError("Empty, malformed, or possibly truncated course response")
     courses = {}
     for row in payload:
@@ -65,7 +145,7 @@ def parse_courses(payload, previous):
             term = str(row["term"]["code"])
         except (KeyError, TypeError):
             raise MonitorError("Missing course identity") from None
-        if (subject, term) != ("ECO", TERM) or number not in NUMBERS:
+        if term != TERM or (subject, number) not in targets:
             continue
         try:
             crn = str(row["crn"])
@@ -86,7 +166,7 @@ def parse_courses(payload, previous):
                     raise MonitorError("Invalid meeting time")
                 times.append(f"{days} {start[:2]}:{start[2:]}–{end[:2]}:{end[2:]}")
             courses[crn] = {
-                "number": number, "section": text(row["section"], "section"),
+                "subject": subject, "number": number, "section": text(row["section"], "section"),
                 "title": text(row["course_title"], "course title"),
                 "remaining": remaining,
                 "instructor": text(row["instructors_string"], "instructor"),
@@ -94,13 +174,15 @@ def parse_courses(payload, previous):
             }
         except (KeyError, TypeError):
             raise MonitorError("Missing or malformed target course data") from None
-    missing = (BASELINE_CRNS | set(previous["sections"])) - set(courses)
-    if missing or {c["number"] for c in courses.values()} != NUMBERS:
+    baseline = {crn for identity in targets for crn in KNOWN_SECTIONS.get(identity, set())}
+    missing = (baseline | set(previous["sections"])) - set(courses)
+    if missing or {(c["subject"], c["number"]) for c in courses.values()} != targets:
         raise MonitorError("Missing expected courses/sections; prior state preserved")
     return courses
 
 
 def validate_state(state):
+    """Reject corrupt history rather than resetting it and repeating old alerts."""
     if not isinstance(state, dict) or state.get("version") != 1 or not isinstance(state.get("sections"), dict):
         raise MonitorError("Invalid persisted state; refusing to reset it")
     for crn, section in state["sections"].items():
@@ -146,6 +228,7 @@ class GitHubState:
 
 
 def notify(title, message):
+    """Publish a push and return its receipt; server acceptance is not phone delivery."""
     topic = os.environ.get("NTFY_TOPIC", "")
     if not re.fullmatch(r"[A-Za-z0-9_-]{20,200}", topic):
         raise MonitorError("NTFY_TOPIC must be configured as a long unguessable topic")
@@ -160,7 +243,8 @@ def notify(title, message):
 
 
 def opening_message(crn, course):
-    title = f"ECO {course['number']} {course['section']}: {course['remaining']} seat(s) open"
+    """Format one section's identity, enrollment, and all scheduled meetings."""
+    title = f"{course['subject']} {course['number']} {course['section']}: {course['remaining']} seat(s) open"
     message = "\n".join([
         course["title"], f"Section {course['section']} | CRN {crn}",
         f"Available seats: {course['remaining']}", f"Instructor: {course['instructor']}",
@@ -171,6 +255,13 @@ def opening_message(crn, course):
 
 
 def check(payload, state, send, save):
+    """Apply a validated snapshot, preserving each successful delivery immediately.
+
+    `send(title, body)` returns an ntfy-style receipt; `save(state)` persists it.
+    Injected callbacks let tests exercise transitions without network requests.
+    Failed sends retain old state for a later retry. A save failure stops the run
+    because continuing could deliver more alerts without durable receipts.
+    """
     courses = parse_courses(payload, state)
     state = copy.deepcopy(state)
     failures = 0
@@ -201,23 +292,25 @@ def check(payload, state, send, save):
 
 
 def main():
+    """Run a read-only live check or the normal persisted notification cycle."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dry-run", action="store_true", help="Live validation only; no alerts or state changes")
     parser.add_argument("--test-notification", action="store_true", help="Also send a test before checking courses")
     args = parser.parse_args()
     if args.dry_run:
-        courses = parse_courses(request_json(API_URL), {"sections": {}})
+        courses = parse_courses(fetch_courses(), {"sections": {}})
     else:
         store = GitHubState()
         state = store.load()  # Missing or unreadable state fails closed.
-        payload = request_json(API_URL)
+        payload = fetch_courses()
         parse_courses(payload, state)
         if args.test_notification:
-            notify("ClassNotifs test", "Test notification: Davidson ECO 203/204 Spring 2027 monitor.\n" + SCHEDULE_URL)
+            labels = ", ".join(f"{subject} {number}" for subject, number in sorted(watched_courses()))
+            notify("ClassNotifs test", f"Test notification: Davidson {labels} monitor (term {TERM}).\n" + SCHEDULE_URL)
             print("Test notification accepted by ntfy")
         courses = check(payload, state, notify, store.save)
     for crn, course in sorted(courses.items()):
-        print(f"ECO {course['number']} {course['section']} CRN {crn}: {course['remaining']} remaining")
+        print(f"{course['subject']} {course['number']} {course['section']} CRN {crn}: {course['remaining']} remaining")
     print("Live validation succeeded; no alerts or state changes" if args.dry_run else "Course check succeeded")
 
 
