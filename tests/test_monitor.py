@@ -24,6 +24,20 @@ def snapshot():
 
 class MonitorTests(unittest.TestCase):
     def setUp(self):
+        # Fixtures describe these courses, independently of the user's watch list.
+        # Editing production configuration must not invalidate synthetic snapshots.
+        config = {
+            "TERM": "202602",
+            "WATCHED_COURSES": {"ECO": {"203", "204"}},
+            "KNOWN_SECTIONS": {
+                ("ECO", "203"): {"20161", "20162", "20592"},
+                ("ECO", "204"): {"20163", "20164"},
+            },
+        }
+        for name, value in config.items():
+            override = patch.object(m, name, value)
+            override.start()
+            self.addCleanup(override.stop)
         self.payload = snapshot()
         self.state = {"version": 1, "sections": {}}
         self.messages = []
