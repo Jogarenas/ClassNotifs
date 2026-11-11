@@ -106,7 +106,7 @@ class MonitorTests(unittest.TestCase):
     def test_malformed_snapshot_never_partially_alerts_or_closes(self):
         self.run_check()
         original = copy.deepcopy(self.state)
-        for change in (None, "1", True, 1.5):
+        for change in (None, "unknown", "1.5", "", True, 1.5):
             payload = copy.deepcopy(self.payload)
             payload[0]["enrollment"]["remaining"] = 1
             payload[-1]["enrollment"]["remaining"] = change
@@ -114,6 +114,17 @@ class MonitorTests(unittest.TestCase):
                 m.check(payload, self.state, self.send, self.save)
             self.assertEqual(self.state, original)
             self.assertEqual(self.messages, [])
+
+    def test_integer_string_enrollment_preserves_alert_transitions(self):
+        # Davidson can serialize enrollment counts as strings on some sections.
+        for remaining in ("0", "-2", "2", "3", "0", "1"):
+            self.payload[0]["enrollment"]["remaining"] = remaining
+            courses = self.run_check()
+            parsed = courses[str(self.payload[0]["crn"])]["remaining"]
+            self.assertIs(type(parsed), int)
+            self.assertEqual(parsed, int(remaining))
+        self.assertEqual(len(self.messages), 2)
+        self.assertIn("2 seat(s)", self.messages[0][0])
 
     def test_missing_fields_empty_bad_and_truncated_payloads(self):
         bad = copy.deepcopy(self.payload)

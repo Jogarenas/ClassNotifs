@@ -153,8 +153,16 @@ def parse_courses(payload, previous):
             if not re.fullmatch(r"[0-9]+", crn) or crn in courses:
                 raise MonitorError("Invalid or duplicate CRN")
             remaining = row["enrollment"]["remaining"]
+            # Davidson sometimes sends counts as JSON strings for individual
+            # sections. Normalize only whole-number strings; do not round floats
+            # or treat missing values/booleans as enrollment counts.
+            if isinstance(remaining, str) and re.fullmatch(r"-?[0-9]+", remaining):
+                try:
+                    remaining = int(remaining)
+                except ValueError:
+                    raise MonitorError("Remaining enrollment is outside the supported integer format") from None
             if type(remaining) is not int:
-                raise MonitorError("Missing or invalid remaining enrollment")
+                raise MonitorError(f"Missing or invalid remaining enrollment for {subject} {number} CRN {crn}")
             meetings = row["meetings"]
             if not isinstance(meetings, list):
                 raise MonitorError("Missing meetings")
