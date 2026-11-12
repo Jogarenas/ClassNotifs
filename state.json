@@ -25,8 +25,12 @@
       "open": false
     },
     "20260": {
-      "alerted": false,
-      "open": false
+      "alerted": true,
+      "delivery": {
+        "at": "2026-11-12T18:32:20.249536+00:00",
+        "id": "VyyKOR0FELyF"
+      },
+      "open": true
     },
     "20592": {
       "alerted": false,
