@@ -36,8 +36,7 @@ from datetime import datetime, timezone
 # Edit this block to choose courses. Numbers apply only to their own department.
 TERM = "202602"
 WATCHED_COURSES = {
-    "ECO": {"203", "204", "211"},
-    "HIS": {"163"}
+    "ECO": {"203", "204", "211"}
     # "MAT": {"230"},  # Uncomment or add another department to watch it too.
 }
 # Optional completeness guards for sections already verified in this term.
